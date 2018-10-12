@@ -1,0 +1,347 @@
+---
+title: "Can we predict canopy temperature of cotton using weather variables?"
+author: "Hiz jamali"
+date: "11 October 2018"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(ggplot2)
+library(emmeans)
+library(reshape2)
+library(lmerTest)
+library(nlme)
+library(lubridate)
+library(readr)
+library(scales)
+```
+## Introduction
+
+Canopy temperature (Tc) is a direct measurement of the energy release by a plant in surface energy flux and an indirect but important indicator for the water status of a plant via its inverse relation to transpiration and stomatal conductance (Jones, 1999). Indeed, continuous measurements of canopy temperature can help identify crop stress (Jackson, 1982; Peñuelas et al., 1992; Patel et al., 2001) and the need for irrigation to optimise growth and yield in crops, since the closure of stomata increases canopy temperature (Brown and Escombe, 1905, reviewed by Guilioni et al., 2008). Continuous measurement of canopy temperature is an important indicator of plant water status of crops and the ability to predict canopy temperature will assist in the implementation of this technology for guiding crop irrigation scheduling. By noting that canopy temperature is related to its environmental weather variables which change over time of the day and have different effect or contribution to canopy temperature, this paper presents a simple probabilistic model to predict canopy temperature by using weather variables which can be obtained from weather model predictions. These models can be used to predict canopy temperature into the near future that can be linked to strategies utilising continuous canopy temperature sensing for irrigation scheduling in cropping systems.
+
+## Materials and methods
+This study utilises canopy temperature data from 4 sensors collected in either fully irrigated or partially irrigated cotton experiments at Narrabri, New South Wales, Australia. The data were leaf surface temperatures measured by wireless, infrared canopy temperature sensor (ArduCrop, CSIRO, Canberra, ACT, Australia) positioned at approximately 20 – 30 cm above the crop canopy during the season. Data was collected at 5 minutes intervals from 21 December 2015 0:00 to 22 March 2016 23:45. However, weather data was collected only at hourly scale from the Australian Bureau of Meteorology (http://bom.gov.au). Canopy temperature data was averaged to 15 minute time intervals. 
+
+Data was downloaded from the collection " Cotton Canopy Temperature" from CSIRO's Data Access Portal using this link:
+
+https://doi.org/10.25919/5badc8df1cd5f
+
+
+```{r echo=TRUE, results= FALSE, warning=FALSE, message=FALSE}
+
+# upload weather data
+weather_raw <- read.csv("C:/Users/jam19e/dataschool/cotton_canopy/data/ACRI_2001_2017.csv") %>% 
+  filter(between(Year,2015, 2016))
+
+str(weather_raw)
+head(weather_raw)
+
+colnames(weather_raw) <- c("datetime", "Year", "Day","Hour",
+                           "maxAT","minAT", "maxST","minST","maxRH","minRH", "WS", "WD","MaxWS", "solar_rad", "rain","tot_rain")
+
+#Plot weather data
+
+#ggplot(weather_raw , aes(datetime, maxAT)) + geom_smooth()
+
+#weather <- NULL
+#system.time(
+
+weather <- weather_raw  %>% 
+  mutate(datetime = as.POSIXct(datetime, format="%d/%m/%Y %H:%M" , tz = "Australia/Brisbane")) %>% 
+  #select(datetime, Year, Day, Hour, maxAT , minAT, maxRH , minRH, WS, solar_rad, rain)%>%
+  #group_by(datetime = ceiling_date(datetime, "15 mins")) %>% 
+  #group_by(datetime) %>% 
+  #summarise_all(funs(mean(., na.rm = TRUE))) %>% 
+  mutate(Year = year(datetime),
+         Day = yday(datetime),
+         Hour = hour(datetime),
+         Minute = minute(datetime),
+         meanAT = (maxAT + minAT)/2, 
+         meanRH = (maxRH + minRH)/2) %>% 
+  select(Year, Day, Hour, meanAT, meanRH, WS, solar_rad, rain)
+
+tz(weather$datetime)
+head(weather)
+
+
+# Specify and load the sensor files
+# Set the working directory where the data is stored
+#setwd(file.path("C:/Users/jam19e/dataschool/cotton_canopy/data/canopy/sensors/")) or use actual file path
+#Create a file that lists filenames
+
+file_names <- list.files(path = "C:/Users/jam19e/dataschool/cotton_canopy/data/canopy", 
+                         full.names = T, pattern = "*.csv") 
+
+# Create a new dataframe that combines all sensor files and adds a column with sensor ID
+sensor_all <- data_frame(filename = file_names) %>%
+  mutate(file_contents = map(filename, ~ read_csv(., skip= 1, col_names = F)))
+
+# add column names using REGEX
+# remove .csv from name
+# select required three columns 
+sensor_extract <- unnest(sensor_all) %>% 
+  rename(datetime = X1, 
+         canopytemp = X2) %>% 
+  mutate(ID = str_remove(filename,"[:graph:]+/")) %>% 
+  mutate(ID = str_remove(ID,".csv")) %>%
+  mutate(datetime = dmy_hm(datetime, tz = "Australia/Sydney")) %>% 
+  filter(between(canopytemp, 5, 50)) %>% #remove bad data points
+  select(ID, datetime, canopytemp)
+
+
+
+
+# Create a df with mean CT at 15 min time intervals
+
+canopy_temp <- sensor_extract %>% 
+  group_by(ID, datetime = ceiling_date(datetime, "15 mins")) %>% 
+  summarise_all(funs(mean(., na.rm = TRUE))) %>% 
+  mutate(Datetime = force_tz(datetime, tz = "Australia/Brisbane"),
+         Year = year(datetime),
+         Day = yday(datetime),
+         Hour = hour(datetime)) %>% 
+  mutate(Treatment=ifelse(ID =="2015_ACRI_LW_3"|ID =="2015_ACRI_LW_5", "Irrigated","Stressed"))%>% 
+  select(ID, datetime, Treatment, Year, Day, Hour, canopytemp) %>% 
+  ungroup()
+
+#Combine CT and weather data
+canopy_weather <- full_join(canopy_temp,weather)%>% 
+  filter(!is.na(ID))
+
+# Visulaize weather and canopy temperature data
+
+```
+
+## Data visualization
+### Weather 
+Weather data included the varibales shown in table below:
+```{r echo=FALSE}
+
+head(weather_raw)
+```
+
+### Canopy temperature
+Canopy temperature files were in csv format with three columns and a header as shown below:
+```{r echo=FALSE}
+head(sensor_extract)
+```
+### Combining weather and canopy temperature data
+To create a new dataframe with only required data, the columns ID, datetime, Year, Day, Hour and canopytemp were selecetd from the sensor_extract df abd columns Year, Day, Hour, meanAT, meanRH, WS, solar_rad and rain were selected from weather df as below:
+```{r echo=FALSE}
+head(canopy_weather)
+
+```
+### Plotting canopy temperature data
+To get an idea of the quality fo data and potential relationships between weather variables and canopy temperature
+```{r echo=FALSE}
+
+# Visulaize weather and canopy temperature data
+#canopy_weather$datetime <- as.Date(canopy_weather$datetime)
+#canopy_weather$ID = as.character(canopy_weather$ID)
+#canopy_weather$ID[canopy_weather$ID =="2015_ACRI_LW_3"] = "Irrigated1"
+#canopy_weather$ID[canopy_weather$ID =="2015_ACRI_LW_5"] = "Irrigated2"
+#canopy_weather$ID[canopy_weather$ID =="2015_ACRI_LW_31"] = "Stressed1"
+#canopy_weather$ID[canopy_weather$ID =="2015_ACRI_LW_35"] = "Stressed2"
+
+ggplot(canopy_weather, aes(x=datetime, y=canopytemp, colour = Treatment))+
+  geom_line()+
+  #scale_x_date(labels = date_format("%m-%y")) 
+  labs(x= "Date", y="Canopy temperature (C)") +
+  facet_wrap(~ID) + 
+  geom_abline(slope = 0, intercept = 28, colour = "blue")
+
+
+
+```
+
+
+Above figures show that:
+
+1) Higher canopy temperature values in December are likely because of smaller canopy resulting in feedback from background soil which is hotter that plants. This data should be excluded for any future analyses. 
+
+2) Canopy temperature is higher in stressed plants compared with irrigated plants especially in late February and March which may influence the relationship between weather variables and canopy temperature.
+
+
+### Clean canopy temperature and weather data
+
+```{r echo=TRUE}
+clean_CT <- canopy_weather %>% 
+  filter(between(Day, 15, 100))
+head(clean_CT)
+```
+
+### Box plots
+
+
+```{r echo=FALSE}
+# 24 hour data
+ggplot(clean_CT, aes(x=Treatment, y=canopytemp, colour=Treatment))+
+  geom_boxplot()+
+  labs(x= "Treatment", y="Canopy temperature (C)")
+
+# Daylight data only
+clean_CT %>% 
+  filter(between(Hour,8,19)) %>% 
+  ggplot(aes(x=Treatment, y=canopytemp, colour=Treatment))+
+  geom_boxplot()+
+  labs(x= "Treatment", y="Canopy temperature (C)")
+
+```
+
+
+### Plotting weather data
+
+### Air temperature
+
+
+```{r echo=FALSE}
+ggplot(clean_CT,aes(x=datetime, y=meanAT))+
+  geom_line()+
+  #scale_x_date(labels = date_format("%m-%y")) + #this messes up the x-axis
+  labs(x= "Date", y="Air temperature (C)") 
+
+```
+
+
+### Regressions: Air temperature vs canopy temperture
+
+The figures below confirm that at higher air temperatures the canopy temperature of irrigated plants remained < 40 degrees while stressed plants heated up to 45 degrees. It might be necessary to build separate prediction models for stressed and well watered crops for accurate prediction. 
+
+```{r echo=FALSE}
+  ggplot(clean_CT, aes(x=meanAT, y=canopytemp, colour=Treatment))+
+  geom_jitter(alpha = 0.3, width = 0.3)+
+  scale_y_continuous(limits =c(5,45)) +
+  labs(x= "Air temperature (C)", y="Canopy temperature (C)") +
+  #facet_wrap(~ID) +
+  geom_abline(slope = 0, intercept = 28, colour = "blue") +
+  geom_smooth(method = "lm", se = F, size = 1)
+  
+
+```
+
+### Regressions: meanRH vs canopy temperture
+
+There seems a negative correlation between relative humidity and canopy temperature. This is expected as higher humidity results in reduced evapotranspiration and affecting plants ability to cool down. RH is a good candidate for predictive model.
+
+```{r echo=FALSE}
+ggplot(clean_CT, aes(x=meanRH, y=canopytemp, colour = Treatment))+
+  geom_jitter(alpha = 0.3, width = 0.3)+
+  scale_y_continuous(limits =c(0,50)) +
+  labs(x= "Relative Humidity (%)", y="Canopy temperature (C)") +
+  #facet_wrap(~ID) +
+  geom_abline(slope = 0, intercept = 28, colour = "blue") +
+  geom_smooth(method = "lm", se = F, size = 1)
+
+```
+
+
+### Regressions: Wind speed vs canopy temperture
+Wind speed does not seem a strong candidate for canopy temperature prediction model but does seem to have more effect on stressed plants. This is likely caused by wind increasing evapotranspiration increasing water in already stressed crop, while irrigated crop is still able to cool itself down because of water availability. 
+```{r echo=FALSE}
+ggplot(clean_CT, aes(x=WS, y=canopytemp, colour = Treatment))+
+  geom_jitter(alpha = 0.3, width = 0.3)+
+  scale_y_continuous(limits =c(0,50)) +
+  labs(x= "Wind speed (km/hour)", y="Canopy temperature (C)") +
+  #facet_wrap(~ID) +
+  geom_abline(slope = 0, intercept = 28, colour = "blue") +
+  geom_smooth(method = "lm", se = F, size = 1)
+
+```
+### Regressions: Solar radiation vs canopy temperture
+Solar radiation seems to have a similar relationship as air temperature. The slope of the regression is flatter for irrigated crops and steeper for stressed crops because of latter's inability to cool due to lack of water availability. However, given air temperature is driven by solar radiation, it may or may not be work including both soalr radiation and air temperature in the model. 
+```{r echo=FALSE}
+ggplot(clean_CT, aes(x=solar_rad, y=canopytemp, colour = Treatment))+
+  geom_jitter(alpha = 0.3, width = 0.3) +
+  scale_y_continuous(limits =c(0,50)) +
+  labs(x= "Solar radiation (KWhr)", y="Canopy temperature (C)") +
+  #facet_wrap(~ID) +
+  geom_abline(slope = 0, intercept = 28, colour = "blue") +
+  geom_smooth(method = "lm", se = F, size = 1)
+
+```
+
+### Regressions: Solar radiation vs canopy temperture
+Does solar radiation drive air temperature? Of course it does. 
+```{r echo=FALSE}
+ggplot(clean_CT, aes(x=solar_rad, y=meanAT))+
+  geom_point()+
+  scale_y_continuous(limits =c(0,50)) +
+  labs(x= "Solar radiation (KWhr)", y="Air temperature (C)") 
+
+```
+
+## Statistical Analyses
+1) Best variables for predicting canopy temperature
+2) Do we need different models to predict canopy temperature of irrigated and water stressed crop?
+
+
+### lmer
+
+```{r echo=FALSE}
+#Sensor ID is random effect
+lmer_CT <- lmer(canopytemp~meanAT+ meanRH + solar_rad + WS + Treatment+ (1|ID) , clean_CT)
+anova(lmer_CT)
+summary(lmer_CT)
+plot(lmer_CT)
+
+lmer_log_CT <- lmer(log(canopytemp)~meanAT + meanRH + solar_rad + + Treatment + (1|ID) , clean_CT)
+anova(lmer_log_CT)
+summary(lmer_log_CT)
+plot(lmer_log_CT)
+
+lmer_sqrt_CT <- lmer(sqrt(canopytemp)~meanAT + meanRH + solar_rad + Treatment + (1|ID) , clean_CT)
+anova(lmer_sqrt_CT)
+summary(lmer_sqrt_CT)
+plot(lmer_sqrt_CT)
+
+lmer_4root_CT <- lmer(((canopytemp)^(1/4))~meanAT + meanRH + solar_rad + Treatment + (1|ID) , clean_CT)
+anova(lmer_4root_CT)
+summary(lmer_4root_CT)
+plot(lmer_4root_CT)
+
+
+emmeans(lmer_sqrt_CT, pairwise~Treatment)
+```
+#### Do we need a different model for stressed and irrigated crops?
+```{r echo=TRUE}
+lmer_sqrt_CT.null = lmer(sqrt(canopytemp)~meanAT + meanRH + solar_rad + WS + (1|ID) , clean_CT, REML = FALSE)
+
+lmer_sqrt_CT.treatment = lmer(sqrt(canopytemp)~meanAT + meanRH + solar_rad + WS + Treatment + (1|ID) , clean_CT, REML = FALSE)
+
+anova(lmer_sqrt_CT.null,lmer_sqrt_CT.treatment)
+
+```
+### Is wind speed an important variable? 
+
+```{r echo=TRUE}
+#Without Wind Speed
+lmer_sqrt_CT.null = lmer(sqrt(canopytemp)~meanAT + meanRH + solar_rad + (1|ID) , clean_CT, REML = FALSE)
+
+lmer_sqrt_CT.WS = lmer(sqrt(canopytemp)~meanAT + meanRH + solar_rad + WS + Treatment + (1|ID) , clean_CT, REML = FALSE)
+
+anova(lmer_sqrt_CT.null,lmer_sqrt_CT.WS)
+
+```
+### Is solar radiation an important variable? 
+
+```{r echo=FALSE}
+#Without solar radiation
+lmer_sqrt_CT.null = lmer(sqrt(canopytemp)~meanAT + meanRH + WS + (1|ID) , clean_CT, REML = FALSE)
+
+# With solar radiation
+lmer_sqrt_CT.SR = lmer(sqrt(canopytemp)~meanAT + meanRH + solar_rad + WS + Treatment + (1|ID) , clean_CT, REML = FALSE)
+
+anova(lmer_sqrt_CT.null,lmer_sqrt_CT.SR)
+
+```
+
+## Future work
+1) Build seprate models for day and night hours
+2) Further break down above models to build a model for different time in the day
+3) Even better use machine learning to build a model for each sensor in realtime while installed at a farm
+4) Test model across years and locations
+
